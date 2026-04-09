@@ -227,7 +227,6 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
     size_t buf_len = (size_t)uart_rx_len;
     if (buf_len == 0) return 0;
 
-    /* static storage of last returned topic+payload to detect "new" data */
     static char last_topic[256] = {0};
     static size_t last_topic_len = 0;
     static char last_payload[1024] = {0};
@@ -236,7 +235,6 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
     size_t p_off = 0;
 
     while (p_off < buf_len) {
-        /* find "+IPD," starting from p_off */
         char *ipd = NULL;
         for (size_t i = p_off; i + 5 <= buf_len; ++i) {
             if (buf[i] == '+' && i + 4 < buf_len &&
@@ -248,42 +246,36 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
         }
         if (!ipd) break;
 
-        char *q = ipd + 5; /* after "+IPD," */
-        /* skip mux id digits */
+        char *q = ipd + 5;
         while ((size_t)(q - buf) < buf_len && *q >= '0' && *q <= '9') q++;
-        if ((size_t)(q - buf) >= buf_len) break; /* incomplete */
+        if ((size_t)(q - buf) >= buf_len) break;
 
         if (*q != ',') { p_off = (size_t)(ipd - buf) + 1; continue; }
-        q++; /* now at length */
+        q++;
 
-        /* parse length */
         int len = 0;
         while ((size_t)(q - buf) < buf_len && *q >= '0' && *q <= '9') {
             len = len*10 + (*q - '0');
             q++;
         }
-        if ((size_t)(q - buf) >= buf_len) break; /* incomplete */
+        if ((size_t)(q - buf) >= buf_len) break;
 
-        if (*q == ':') q++; /* data starts at q */
+        if (*q == ':') q++;
         else {
-            /* try to find ':' within remaining bytes */
             char *col = memchr(q, ':', buf_len - (size_t)(q - buf));
             if (!col) break;
             q = col + 1;
         }
 
-        /* ensure 'len' payload bytes are present */
-        if ((size_t)(buf + buf_len - q) < (size_t)len) break; /* incomplete */
+        if ((size_t)(buf + buf_len - q) < (size_t)len) break;
 
         uint8_t *data = (uint8_t*)q;
         int available = len;
         int idx = 0;
 
-        /* Only handle MQTT PUBLISH (0x30..0x3F) */
         if (available > 0 && (data[idx] & 0xF0) == 0x30) {
-            idx++; /* fixed header byte consumed */
+            idx++;
 
-            /* decode Remaining Length (var-length) */
             int rem_len = 0;
             int multiplier = 1;
             uint8_t encoded;
@@ -294,40 +286,34 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
                 multiplier *= 128;
             } while ((encoded & 0x80) && idx < available);
 
-            if (idx < 0) { /* malformed/incomplete, skip this ipd */
+            if (idx < 0) {
                 p_off = (size_t)(q - buf) + len;
                 continue;
             }
 
-            /* topic length (2 bytes big-endian) */
             if (idx + 2 > available) { p_off = (size_t)(q - buf) + len; continue; }
             int topic_len = (data[idx] << 8) | data[idx+1];
             idx += 2;
 
             if (idx + topic_len > available) { p_off = (size_t)(q - buf) + len; continue; }
-            /* copy topic to local temporary */
             int tl = topic_len;
             if (tl > 255) tl = 255;
             char topic_local[256];
             if (topic_out && topic_out_size > 0) {
-                /* copy into topic_local, then will copy to topic_out if accepted as new */
                 memcpy(topic_local, &data[idx], tl);
                 topic_local[tl] = '\0';
             } else {
-                /* still read into local buffer to compare with last topic */
                 memcpy(topic_local, &data[idx], tl > 255 ? 255 : tl);
                 topic_local[tl > 255 ? 255 : tl] = '\0';
             }
             idx += topic_len;
 
-            /* Determine QoS and skip packet identifier if needed */
-            uint8_t qos = (data[0] >> 1) & 0x03; /* from first fixed header byte */
+            uint8_t qos = (data[0] >> 1) & 0x03;
             if (qos > 0) {
                 if (idx + 2 > available) { p_off = (size_t)(q - buf) + len; continue; }
                 idx += 2;
             }
 
-            /* compute payload length (remaining - 2 - topic_len - packet id if any) */
             int payload_len = rem_len - 2 - topic_len - (qos > 0 ? 2 : 0);
             if (payload_len < 0) payload_len = 0;
             if (payload_len > available - idx) payload_len = available - idx;
@@ -337,14 +323,12 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
             memcpy(payload_local, &data[idx], payload_len);
             payload_local[payload_len] = '\0';
 
-            /* Compare with last returned topic+payload — if different, return this one */
             int is_new = 0;
             if (payload_len != (int)last_payload_len) {
                 is_new = 1;
             } else {
                 if (memcmp(payload_local, last_payload, payload_len) != 0) is_new = 1;
             }
-            /* Also consider topic changes as new */
             if (!is_new) {
                 size_t tlen_check = (tl < (int)sizeof(last_topic)) ? (size_t)tl : (sizeof(last_topic)-1);
                 if (tlen_check != last_topic_len) is_new = 1;
@@ -352,7 +336,6 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
             }
 
             if (is_new) {
-                /* copy into outputs (respect sizes) */
                 if (topic_out && topic_out_size > 0) {
                     size_t copy_t = (size_t)tl < (topic_out_size - 1) ? (size_t)tl : (topic_out_size - 1);
                     memcpy(topic_out, topic_local, copy_t);
@@ -362,7 +345,6 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
                 memcpy(payload_out, payload_local, copy_p);
                 payload_out[copy_p] = '\0';
 
-                /* save as last returned */
                 last_payload_len = copy_p;
                 memcpy(last_payload, payload_local, copy_p);
                 last_payload[copy_p] = '\0';
@@ -376,16 +358,14 @@ int wifi_readMQTT_pub(char *topic_out, size_t topic_out_size, char *payload_out,
                     last_topic[0] = '\0';
                 }
 
-                return 1; /* found new payload, returned */
+                return 1;
             }
-            /* else not new — continue scanning next +IPD in this chunk */
-        } /* end PUBLISH check */
+        }
 
-        /* advance past this +IPD block */
         p_off = (size_t)(q - buf) + len;
-    } /* end while scan */
+    }
 
-    return 0; /* no new publish found in this chunk */
+    return 0;
 }
 
 // ========== DMA callbacks ==========
